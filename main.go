@@ -105,13 +105,28 @@ type TaskResource struct {
 }
 
 func (t *TaskResource) GetAll(w http.ResponseWriter, r *http.Request) {
-    tasks := t.s.GetAll()
-    err := json.NewEncoder(w).Encode(tasks)
-    if err != nil {
-        fmt.Printf("Failed to encode: %v\n", err)
-        w.WriteHeader(http.StatusInternalServerError)
+    ctx := r.Context()
+    cacheKey := "all_tasks"
+    
+    cachedTasks, err := t.cache.Get(ctx, cacheKey)
+    if err == nil {
+        w.Header().Set("Content-Type", "application/json")
+        w.Write([]byte(cachedTasks))
         return
     }
+
+    tasks := t.s.GetAll()
+    
+    tasksJSON, err := json.Marshal(tasks)
+    if err == nil {
+        err = t.cache.Set(ctx, cacheKey, string(tasksJSON), time.Minute*5) // Кешуємо на 5 хвилин
+        if err != nil {
+            fmt.Printf("Failed to cache all tasks: %v\n", err)
+        }
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(tasks)
 }
 
 func (t *TaskResource) CreateOne(w http.ResponseWriter, r *http.Request) {
@@ -123,6 +138,14 @@ func (t *TaskResource) CreateOne(w http.ResponseWriter, r *http.Request) {
         return
     }
     task.ID = t.s.Add(task)
+    
+    cacheKey := fmt.Sprintf("task:%d", task.ID)
+    taskJSON, _ := json.Marshal(task)
+    err = t.cache.Set(r.Context(), cacheKey, string(taskJSON), time.Hour)
+    if err != nil {
+        fmt.Printf("Failed to cache new task: %v\n", err)
+    }
+
     err = json.NewEncoder(w).Encode(task)
     if err != nil {
         fmt.Printf("Failed to encode: %v\n", err)
@@ -145,24 +168,20 @@ func (t *TaskResource) GetOne(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    // Спробуємо отримати дані з кешу
     cacheKey := fmt.Sprintf("task:%d", id)
     cachedTask, err := t.cache.Get(ctx, cacheKey)
     if err == nil {
-        // Якщо дані є в кеші, повертаємо їх
         w.Header().Set("Content-Type", "application/json")
         w.Write([]byte(cachedTask))
         return
     }
 
-    // Якщо даних немає в кеші, отримуємо їх з бази даних
     task, ok := t.s.Get(id)
     if !ok {
         http.NotFound(w, r)
         return
     }
 
-    // Зберігаємо дані в кеш
     taskJSON, _ := json.Marshal(task)
     err = t.cache.Set(ctx, cacheKey, string(taskJSON), time.Hour)
     if err != nil {
@@ -170,7 +189,7 @@ func (t *TaskResource) GetOne(w http.ResponseWriter, r *http.Request) {
     }
 
     w.Header().Set("Content-Type", "application/json")
-    json.NewEncoder(w).Encode(task)
+    w.Write(taskJSON)
 }
 
 func (t *TaskResource) UpdateOne(w http.ResponseWriter, r *http.Request) {
@@ -196,12 +215,10 @@ func (t *TaskResource) UpdateOne(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    // Оновлюємо кеш
     cacheKey := fmt.Sprintf("task:%d", id)
-    taskJSON, _ := json.Marshal(task)
-    err = t.cache.Set(ctx, cacheKey, string(taskJSON), time.Hour)
+    err = t.cache.Del(ctx, cacheKey)
     if err != nil {
-        fmt.Printf("Failed to update cache: %v\n", err)
+        fmt.Printf("Failed to delete from cache: %v\n", err)
     }
 
     w.WriteHeader(http.StatusOK)
